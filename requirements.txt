@@ -3,3 +3,6 @@ graphene-django>=3.0.0
 psycopg2-binary>=2.9.0
 django-cors-headers>=4.0.0
 python-decouple>=3.8
+promise>=2.3
+graphql-core>=3.2.0
+graphene>=3.0.0

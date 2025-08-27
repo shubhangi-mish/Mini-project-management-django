@@ -144,7 +144,65 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # GraphQL Configuration
 GRAPHENE = {
-    'SCHEMA': 'mini_project_management.schema.schema'
+    'SCHEMA': 'mini_project_management.schema.schema',
+    'MIDDLEWARE': [
+        'core.query_complexity.QueryComplexityMiddleware',
+    ],
+}
+
+# GraphQL Query Optimization Settings
+GRAPHQL_MAX_COMPLEXITY = config('GRAPHQL_MAX_COMPLEXITY', default=1000, cast=int)
+GRAPHQL_MAX_DEPTH = config('GRAPHQL_MAX_DEPTH', default=10, cast=int)
+
+# Cache Configuration for GraphQL optimization
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+        'TIMEOUT': 300,  # 5 minutes default timeout
+        'OPTIONS': {
+            'MAX_ENTRIES': 1000,
+        }
+    }
+}
+
+# Logging configuration for GraphQL performance monitoring
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'file': {
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'graphql.log',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'graphql.complexity': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'graphql.performance': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
 }
 
 # CORS Configuration

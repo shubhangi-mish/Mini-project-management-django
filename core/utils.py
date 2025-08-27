@@ -3,6 +3,7 @@ Utility functions for organization-scoped queries and operations.
 """
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from django.db import models
+from django.core.cache import cache
 from core.models import Organization
 
 
@@ -313,3 +314,93 @@ class OrganizationContextDecorator:
 # Decorator instances for common use cases
 require_organization_context = OrganizationContextDecorator(require_organization=True)
 optional_organization_context = OrganizationContextDecorator(require_organization=False)
+
+
+# Cache management utilities for statistics
+def invalidate_project_statistics_cache(project_id, organization_slug):
+    """
+    Invalidate cached project statistics when project or task data changes.
+    
+    Args:
+        project_id: Project ID
+        organization_slug: Organization slug
+    """
+    cache_key = f"project_stats_{project_id}_{organization_slug}"
+    cache.delete(cache_key)
+
+
+def invalidate_organization_statistics_cache(organization_slug):
+    """
+    Invalidate cached organization statistics when organization data changes.
+    
+    Args:
+        organization_slug: Organization slug
+    """
+    cache_key = f"org_stats_{organization_slug}"
+    cache.delete(cache_key)
+
+
+def invalidate_all_statistics_cache(organization_slug):
+    """
+    Invalidate all statistics caches for an organization.
+    
+    Args:
+        organization_slug: Organization slug
+    """
+    # Invalidate organization-level cache
+    invalidate_organization_statistics_cache(organization_slug)
+    
+    # Invalidate all project-level caches for this organization
+    from projects.models import Project
+    try:
+        organization = Organization.objects.get(slug=organization_slug)
+        project_ids = organization.projects.values_list('id', flat=True)
+        for project_id in project_ids:
+            invalidate_project_statistics_cache(project_id, organization_slug)
+    except Organization.DoesNotExist:
+        pass
+
+
+def get_cached_project_statistics(project_id, organization_slug, calculate_func):
+    """
+    Get project statistics with caching support.
+    
+    Args:
+        project_id: Project ID
+        organization_slug: Organization slug
+        calculate_func: Function to calculate statistics if not cached
+        
+    Returns:
+        Statistics object or dict
+    """
+    cache_key = f"project_stats_{project_id}_{organization_slug}"
+    cached_stats = cache.get(cache_key)
+    
+    if cached_stats is None:
+        cached_stats = calculate_func()
+        # Cache for 5 minutes
+        cache.set(cache_key, cached_stats, 300)
+    
+    return cached_stats
+
+
+def get_cached_organization_statistics(organization_slug, calculate_func):
+    """
+    Get organization statistics with caching support.
+    
+    Args:
+        organization_slug: Organization slug
+        calculate_func: Function to calculate statistics if not cached
+        
+    Returns:
+        Statistics object or dict
+    """
+    cache_key = f"org_stats_{organization_slug}"
+    cached_stats = cache.get(cache_key)
+    
+    if cached_stats is None:
+        cached_stats = calculate_func()
+        # Cache for 10 minutes (organization stats change less frequently)
+        cache.set(cache_key, cached_stats, 600)
+    
+    return cached_stats

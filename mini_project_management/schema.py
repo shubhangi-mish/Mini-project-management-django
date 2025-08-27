@@ -2,11 +2,54 @@ import graphene
 from graphene_django import DjangoObjectType
 from django.core.exceptions import ValidationError
 from django.utils import timezone
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Prefetch
 from django.core.cache import cache
 from core.models import Organization
 from projects.models import Project
 from tasks.models import Task, TaskComment
+from core.dataloaders import get_dataloaders
+from core.resolvers import OptimizedQuery, CacheUtils
+from core.query_complexity import QueryComplexityMiddleware
+
+
+# Statistics Types (defined first to avoid forward reference issues)
+class TaskStatusBreakdown(graphene.ObjectType):
+    """GraphQL type for task status breakdown statistics"""
+    
+    todo_count = graphene.Int(description="Number of tasks with TODO status")
+    in_progress_count = graphene.Int(description="Number of tasks with IN_PROGRESS status")
+    done_count = graphene.Int(description="Number of tasks with DONE status")
+    total_count = graphene.Int(description="Total number of tasks")
+
+
+class ProjectStatistics(graphene.ObjectType):
+    """GraphQL type for project statistics and analytics"""
+    
+    project_id = graphene.ID(description="Project ID these statistics belong to")
+    total_tasks = graphene.Int(description="Total number of tasks in the project")
+    completed_tasks = graphene.Int(description="Number of completed tasks")
+    in_progress_tasks = graphene.Int(description="Number of tasks in progress")
+    todo_tasks = graphene.Int(description="Number of tasks not started")
+    completion_rate = graphene.Float(description="Completion rate as percentage (0-100)")
+    task_status_breakdown = graphene.Field(TaskStatusBreakdown, description="Breakdown of tasks by status")
+    assigned_tasks = graphene.Int(description="Number of tasks with assignees")
+    unassigned_tasks = graphene.Int(description="Number of tasks without assignees")
+    overdue_tasks = graphene.Int(description="Number of overdue tasks")
+
+
+class OrganizationStatistics(graphene.ObjectType):
+    """GraphQL type for organization-level statistics and analytics"""
+    
+    organization_id = graphene.ID(description="Organization ID these statistics belong to")
+    total_projects = graphene.Int(description="Total number of projects in the organization")
+    active_projects = graphene.Int(description="Number of active projects")
+    completed_projects = graphene.Int(description="Number of completed projects")
+    on_hold_projects = graphene.Int(description="Number of projects on hold")
+    total_tasks = graphene.Int(description="Total number of tasks across all projects")
+    completed_tasks = graphene.Int(description="Total number of completed tasks")
+    overall_completion_rate = graphene.Float(description="Overall completion rate across all projects")
+    project_completion_rate = graphene.Float(description="Percentage of completed projects")
+    task_status_breakdown = graphene.Field(TaskStatusBreakdown, description="Organization-wide task status breakdown")
 
 
 # GraphQL Types
@@ -19,29 +62,119 @@ class OrganizationType(DjangoObjectType):
 
 
 class ProjectType(DjangoObjectType):
-    """GraphQL type for Project model"""
+    """GraphQL type for Project model with optimized resolvers"""
     
     task_count = graphene.Int()
     completed_task_count = graphene.Int()
     completion_percentage = graphene.Float()
     is_overdue = graphene.Boolean()
+    statistics = graphene.Field(ProjectStatistics, description="Detailed project statistics")
     
     class Meta:
         model = Project
         fields = ('id', 'organization', 'name', 'description', 'status', 'due_date',
                  'created_at', 'updated_at', 'tasks')
     
+    def resolve_tasks(self, info):
+        """Resolve tasks using DataLoader to prevent N+1 queries."""
+        dataloaders = get_dataloaders(info)
+        return dataloaders.tasks_by_project_loader.load(self.id)
+    
     def resolve_task_count(self, info):
-        return self.task_count
+        """Resolve task count using annotation when available."""
+        if hasattr(self, 'task_count'):
+            return self.task_count
+        # Fallback to DataLoader if annotation not available
+        dataloaders = get_dataloaders(info)
+        return dataloaders.tasks_by_project_loader.load(self.id).then(
+            lambda tasks: len(tasks) if tasks else 0
+        )
     
     def resolve_completed_task_count(self, info):
-        return self.completed_task_count
+        """Resolve completed task count using annotation when available."""
+        if hasattr(self, 'completed_task_count'):
+            return self.completed_task_count
+        # Fallback to DataLoader
+        dataloaders = get_dataloaders(info)
+        return dataloaders.tasks_by_project_loader.load(self.id).then(
+            lambda tasks: len([t for t in tasks if t.status == 'DONE']) if tasks else 0
+        )
     
     def resolve_completion_percentage(self, info):
-        return self.completion_percentage
+        """Resolve completion percentage efficiently."""
+        if hasattr(self, 'task_count') and hasattr(self, 'completed_task_count'):
+            total = self.task_count or 0
+            completed = self.completed_task_count or 0
+            return round((completed / total * 100), 2) if total > 0 else 0
+        
+        # Fallback to DataLoader
+        dataloaders = get_dataloaders(info)
+        return dataloaders.tasks_by_project_loader.load(self.id).then(
+            lambda tasks: self._calculate_completion_percentage(tasks)
+        )
+    
+    def _calculate_completion_percentage(self, tasks):
+        """Helper method to calculate completion percentage."""
+        if not tasks:
+            return 0
+        total = len(tasks)
+        completed = len([t for t in tasks if t.status == 'DONE'])
+        return round((completed / total * 100), 2) if total > 0 else 0
     
     def resolve_is_overdue(self, info):
         return self.is_overdue
+    
+    def resolve_statistics(self, info):
+        """
+        Resolve detailed project statistics with caching.
+        """
+        # Check cache first
+        cache_key = f"project_stats_{self.id}_{self.organization.slug}"
+        cached_stats = cache.get(cache_key)
+        if cached_stats:
+            return cached_stats
+        
+        # Calculate statistics using optimized queries
+        task_stats = self.tasks.aggregate(
+            total_tasks=Count('id'),
+            completed_tasks=Count('id', filter=Q(status='DONE')),
+            in_progress_tasks=Count('id', filter=Q(status='IN_PROGRESS')),
+            todo_tasks=Count('id', filter=Q(status='TODO')),
+            assigned_tasks=Count('id', filter=~Q(assignee_email='')),
+            overdue_tasks=Count('id', filter=Q(due_date__lt=timezone.now(), status__in=['TODO', 'IN_PROGRESS']))
+        )
+        
+        # Calculate completion rate
+        total_tasks = task_stats['total_tasks'] or 0
+        completed_tasks = task_stats['completed_tasks'] or 0
+        completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+        
+        # Create task status breakdown
+        task_breakdown = TaskStatusBreakdown(
+            todo_count=task_stats['todo_tasks'] or 0,
+            in_progress_count=task_stats['in_progress_tasks'] or 0,
+            done_count=task_stats['completed_tasks'] or 0,
+            total_count=total_tasks
+        )
+        
+        # Create statistics object
+        statistics = ProjectStatistics(
+            project_id=self.id,
+            total_tasks=total_tasks,
+            completed_tasks=completed_tasks,
+            in_progress_tasks=task_stats['in_progress_tasks'] or 0,
+            todo_tasks=task_stats['todo_tasks'] or 0,
+            completion_rate=round(completion_rate, 2),
+            task_status_breakdown=task_breakdown,
+            assigned_tasks=task_stats['assigned_tasks'] or 0,
+            unassigned_tasks=total_tasks - (task_stats['assigned_tasks'] or 0),
+            overdue_tasks=task_stats['overdue_tasks'] or 0
+        )
+        
+        # Cache the results for 5 minutes
+        cache.set(cache_key, statistics, 300)
+        
+        return statistics
 
 
 class TaskCommentType(DjangoObjectType):
@@ -58,7 +191,7 @@ class TaskCommentType(DjangoObjectType):
 
 
 class TaskType(DjangoObjectType):
-    """GraphQL type for Task model"""
+    """GraphQL type for Task model with optimized resolvers"""
     
     is_overdue = graphene.Boolean()
     is_assigned = graphene.Boolean()
@@ -69,14 +202,73 @@ class TaskType(DjangoObjectType):
         fields = ('id', 'project', 'title', 'description', 'status', 'assignee_email',
                  'due_date', 'created_at', 'updated_at', 'comments')
     
+    def resolve_comments(self, info):
+        """Resolve comments using DataLoader to prevent N+1 queries."""
+        dataloaders = get_dataloaders(info)
+        return dataloaders.comments_by_task_loader.load(self.id)
+    
+    def resolve_project(self, info):
+        """Resolve project using DataLoader when needed."""
+        if hasattr(self, '_prefetched_objects_cache') and 'project' in self._prefetched_objects_cache:
+            return self.project
+        
+        dataloaders = get_dataloaders(info)
+        return dataloaders.project_loader.load(self.project_id)
+    
+    def resolve_comment_count(self, info):
+        """Resolve comment count using annotation when available."""
+        if hasattr(self, 'comment_count'):
+            return self.comment_count
+        # Fallback to DataLoader
+        dataloaders = get_dataloaders(info)
+        return dataloaders.comments_by_task_loader.load(self.id).then(
+            lambda comments: len(comments) if comments else 0
+        )
+    
     def resolve_is_overdue(self, info):
         return self.is_overdue
     
     def resolve_is_assigned(self, info):
         return self.is_assigned
+
+
+class TaskStatusBreakdown(graphene.ObjectType):
+    """GraphQL type for task status breakdown statistics"""
     
-    def resolve_comment_count(self, info):
-        return self.comment_count
+    todo_count = graphene.Int(description="Number of tasks with TODO status")
+    in_progress_count = graphene.Int(description="Number of tasks with IN_PROGRESS status")
+    done_count = graphene.Int(description="Number of tasks with DONE status")
+    total_count = graphene.Int(description="Total number of tasks")
+
+
+class ProjectStatistics(graphene.ObjectType):
+    """GraphQL type for project statistics and analytics"""
+    
+    project_id = graphene.ID(description="Project ID these statistics belong to")
+    total_tasks = graphene.Int(description="Total number of tasks in the project")
+    completed_tasks = graphene.Int(description="Number of completed tasks")
+    in_progress_tasks = graphene.Int(description="Number of tasks in progress")
+    todo_tasks = graphene.Int(description="Number of tasks not started")
+    completion_rate = graphene.Float(description="Completion rate as percentage (0-100)")
+    task_status_breakdown = graphene.Field(TaskStatusBreakdown, description="Breakdown of tasks by status")
+    assigned_tasks = graphene.Int(description="Number of tasks with assignees")
+    unassigned_tasks = graphene.Int(description="Number of tasks without assignees")
+    overdue_tasks = graphene.Int(description="Number of overdue tasks")
+
+
+class OrganizationStatistics(graphene.ObjectType):
+    """GraphQL type for organization-level statistics and analytics"""
+    
+    organization_id = graphene.ID(description="Organization ID these statistics belong to")
+    total_projects = graphene.Int(description="Total number of projects in the organization")
+    active_projects = graphene.Int(description="Number of active projects")
+    completed_projects = graphene.Int(description="Number of completed projects")
+    on_hold_projects = graphene.Int(description="Number of projects on hold")
+    total_tasks = graphene.Int(description="Total number of tasks across all projects")
+    completed_tasks = graphene.Int(description="Total number of completed tasks")
+    overall_completion_rate = graphene.Float(description="Overall completion rate across all projects")
+    project_completion_rate = graphene.Float(description="Percentage of completed projects")
+    task_status_breakdown = graphene.Field(TaskStatusBreakdown, description="Organization-wide task status breakdown")
 
 
 # Input Types for Task Mutations
@@ -148,6 +340,359 @@ class CreateTaskCommentPayload(graphene.ObjectType):
 
 class Query(graphene.ObjectType):
     hello = graphene.String(default_value="Hello World!")
+    
+    # Optimized project queries
+    projects = graphene.List(
+        ProjectType,
+        organization_slug=graphene.String(required=True),
+        status=graphene.String(),
+        limit=graphene.Int(default_value=50),
+        offset=graphene.Int(default_value=0),
+        description="Get projects with efficient loading"
+    )
+    project = graphene.Field(
+        ProjectType,
+        id=graphene.ID(required=True),
+        organization_slug=graphene.String(required=True),
+        description="Get single project with optimized loading"
+    )
+    
+    # Optimized task queries
+    tasks = graphene.List(
+        TaskType,
+        project_id=graphene.ID(),
+        organization_slug=graphene.String(required=True),
+        status=graphene.String(),
+        assignee_email=graphene.String(),
+        limit=graphene.Int(default_value=100),
+        offset=graphene.Int(default_value=0),
+        description="Get tasks with efficient loading"
+    )
+    task = graphene.Field(
+        TaskType,
+        id=graphene.ID(required=True),
+        organization_slug=graphene.String(required=True),
+        description="Get single task with optimized loading"
+    )
+    
+    # Comment queries
+    task_comments = graphene.List(
+        TaskCommentType,
+        task_id=graphene.ID(required=True),
+        organization_slug=graphene.String(required=True),
+        limit=graphene.Int(default_value=50),
+        offset=graphene.Int(default_value=0),
+        description="Get task comments with efficient loading"
+    )
+    
+    # Project statistics queries
+    project_statistics = graphene.Field(
+        ProjectStatistics,
+        project_id=graphene.ID(required=True),
+        organization_slug=graphene.String(required=True),
+        description="Get statistics for a specific project"
+    )
+    
+    # Organization statistics queries
+    organization_statistics = graphene.Field(
+        OrganizationStatistics,
+        organization_slug=graphene.String(required=True),
+        description="Get organization-wide statistics and analytics"
+    )
+    
+    def resolve_projects(self, info, organization_slug, status=None, limit=50, offset=0):
+        """
+        Resolve projects with optimized queries and DataLoader integration.
+        """
+        try:
+            # Validate organization
+            organization = Organization.objects.get(slug=organization_slug)
+        except Organization.DoesNotExist:
+            raise Exception(f"Organization with slug '{organization_slug}' not found")
+        
+        # Build optimized queryset
+        queryset = Project.objects.select_related('organization').filter(
+            organization=organization
+        ).prefetch_related(
+            Prefetch(
+                'tasks',
+                queryset=Task.objects.select_related('project').only(
+                    'id', 'title', 'status', 'assignee_email', 'due_date', 'project_id'
+                )
+            )
+        ).annotate(
+            task_count=Count('tasks'),
+            completed_task_count=Count('tasks', filter=Q(tasks__status='DONE')),
+            in_progress_task_count=Count('tasks', filter=Q(tasks__status='IN_PROGRESS')),
+            todo_task_count=Count('tasks', filter=Q(tasks__status='TODO'))
+        )
+        
+        # Apply status filter if provided
+        if status:
+            queryset = queryset.filter(status=status)
+        
+        # Apply pagination
+        queryset = queryset[offset:offset + limit]
+        
+        return queryset
+    
+    def resolve_project(self, info, id, organization_slug):
+        """
+        Resolve single project with optimized loading using DataLoader.
+        """
+        try:
+            # Validate organization
+            organization = Organization.objects.get(slug=organization_slug)
+        except Organization.DoesNotExist:
+            raise Exception(f"Organization with slug '{organization_slug}' not found")
+        
+        try:
+            # Use optimized query with prefetch
+            project = Project.objects.select_related('organization').prefetch_related(
+                Prefetch(
+                    'tasks',
+                    queryset=Task.objects.select_related('project').prefetch_related(
+                        Prefetch(
+                            'comments',
+                            queryset=TaskComment.objects.select_related('task').only(
+                                'id', 'content', 'author_email', 'created_at', 'task_id'
+                            )
+                        )
+                    )
+                )
+            ).get(id=id, organization=organization)
+            
+            return project
+        except Project.DoesNotExist:
+            raise Exception(f"Project with ID '{id}' not found in organization '{organization_slug}'")
+    
+    def resolve_tasks(self, info, organization_slug, project_id=None, status=None, 
+                     assignee_email=None, limit=100, offset=0):
+        """
+        Resolve tasks with optimized queries and filtering.
+        """
+        try:
+            # Validate organization
+            organization = Organization.objects.get(slug=organization_slug)
+        except Organization.DoesNotExist:
+            raise Exception(f"Organization with slug '{organization_slug}' not found")
+        
+        # Build optimized queryset
+        queryset = Task.objects.select_related(
+            'project', 'project__organization'
+        ).prefetch_related(
+            Prefetch(
+                'comments',
+                queryset=TaskComment.objects.select_related('task').only(
+                    'id', 'content', 'author_email', 'created_at', 'task_id'
+                )
+            )
+        ).filter(project__organization=organization).annotate(
+            comment_count=Count('comments')
+        )
+        
+        # Apply filters
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        if status:
+            queryset = queryset.filter(status=status)
+        if assignee_email:
+            queryset = queryset.filter(assignee_email=assignee_email)
+        
+        # Apply pagination
+        queryset = queryset[offset:offset + limit]
+        
+        return queryset
+    
+    def resolve_task(self, info, id, organization_slug):
+        """
+        Resolve single task with optimized loading using DataLoader.
+        """
+        try:
+            # Validate organization
+            organization = Organization.objects.get(slug=organization_slug)
+        except Organization.DoesNotExist:
+            raise Exception(f"Organization with slug '{organization_slug}' not found")
+        
+        try:
+            # Use optimized query with prefetch
+            task = Task.objects.select_related(
+                'project', 'project__organization'
+            ).prefetch_related(
+                Prefetch(
+                    'comments',
+                    queryset=TaskComment.objects.select_related('task').order_by('created_at')
+                )
+            ).get(id=id, project__organization=organization)
+            
+            return task
+        except Task.DoesNotExist:
+            raise Exception(f"Task with ID '{id}' not found in organization '{organization_slug}'")
+    
+    def resolve_task_comments(self, info, task_id, organization_slug, limit=50, offset=0):
+        """
+        Resolve task comments with optimized loading.
+        """
+        try:
+            # Validate organization and task
+            organization = Organization.objects.get(slug=organization_slug)
+            task = Task.objects.select_related('project').get(
+                id=task_id, project__organization=organization
+            )
+        except Organization.DoesNotExist:
+            raise Exception(f"Organization with slug '{organization_slug}' not found")
+        except Task.DoesNotExist:
+            raise Exception(f"Task with ID '{task_id}' not found in organization '{organization_slug}'")
+        
+        # Get comments with optimized query
+        queryset = TaskComment.objects.select_related(
+            'task', 'task__project'
+        ).filter(task=task).order_by('created_at')
+        
+        # Apply pagination
+        queryset = queryset[offset:offset + limit]
+        
+        return queryset
+    
+    def resolve_project_statistics(self, info, project_id, organization_slug):
+        """
+        Resolve project statistics with caching for performance optimization.
+        """
+        try:
+            # Validate organization exists
+            try:
+                organization = Organization.objects.get(slug=organization_slug)
+            except Organization.DoesNotExist:
+                raise Exception(f"Organization with slug '{organization_slug}' not found")
+            
+            # Validate project exists and belongs to organization
+            try:
+                project = Project.objects.get(id=project_id, organization=organization)
+            except Project.DoesNotExist:
+                raise Exception(f"Project with ID '{project_id}' not found in organization '{organization_slug}'")
+            
+            # Check cache first
+            cache_key = f"project_stats_{project_id}_{organization_slug}"
+            cached_stats = cache.get(cache_key)
+            if cached_stats:
+                return cached_stats
+            
+            # Calculate statistics using optimized queries
+            task_stats = project.tasks.aggregate(
+                total_tasks=Count('id'),
+                completed_tasks=Count('id', filter=Q(status='DONE')),
+                in_progress_tasks=Count('id', filter=Q(status='IN_PROGRESS')),
+                todo_tasks=Count('id', filter=Q(status='TODO')),
+                assigned_tasks=Count('id', filter=~Q(assignee_email='')),
+                overdue_tasks=Count('id', filter=Q(due_date__lt=timezone.now(), status__in=['TODO', 'IN_PROGRESS']))
+            )
+            
+            # Calculate completion rate
+            total_tasks = task_stats['total_tasks'] or 0
+            completed_tasks = task_stats['completed_tasks'] or 0
+            completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+            
+            # Create task status breakdown
+            task_breakdown = TaskStatusBreakdown(
+                todo_count=task_stats['todo_tasks'] or 0,
+                in_progress_count=task_stats['in_progress_tasks'] or 0,
+                done_count=task_stats['completed_tasks'] or 0,
+                total_count=total_tasks
+            )
+            
+            # Create statistics object
+            statistics = ProjectStatistics(
+                project_id=project_id,
+                total_tasks=total_tasks,
+                completed_tasks=completed_tasks,
+                in_progress_tasks=task_stats['in_progress_tasks'] or 0,
+                todo_tasks=task_stats['todo_tasks'] or 0,
+                completion_rate=round(completion_rate, 2),
+                task_status_breakdown=task_breakdown,
+                assigned_tasks=task_stats['assigned_tasks'] or 0,
+                unassigned_tasks=total_tasks - (task_stats['assigned_tasks'] or 0),
+                overdue_tasks=task_stats['overdue_tasks'] or 0
+            )
+            
+            # Cache the results for 5 minutes
+            cache.set(cache_key, statistics, 300)
+            
+            return statistics
+            
+        except Exception as e:
+            raise Exception(f"Error calculating project statistics: {str(e)}")
+    
+    def resolve_organization_statistics(self, info, organization_slug):
+        """
+        Resolve organization-wide statistics with caching for performance optimization.
+        """
+        try:
+            # Validate organization exists
+            try:
+                organization = Organization.objects.get(slug=organization_slug)
+            except Organization.DoesNotExist:
+                raise Exception(f"Organization with slug '{organization_slug}' not found")
+            
+            # Check cache first
+            cache_key = f"org_stats_{organization_slug}"
+            cached_stats = cache.get(cache_key)
+            if cached_stats:
+                return cached_stats
+            
+            # Calculate project statistics
+            project_stats = organization.projects.aggregate(
+                total_projects=Count('id'),
+                active_projects=Count('id', filter=Q(status='ACTIVE')),
+                completed_projects=Count('id', filter=Q(status='COMPLETED')),
+                on_hold_projects=Count('id', filter=Q(status='ON_HOLD'))
+            )
+            
+            # Calculate organization-wide task statistics
+            task_stats = Task.objects.filter(project__organization=organization).aggregate(
+                total_tasks=Count('id'),
+                completed_tasks=Count('id', filter=Q(status='DONE')),
+                in_progress_tasks=Count('id', filter=Q(status='IN_PROGRESS')),
+                todo_tasks=Count('id', filter=Q(status='TODO'))
+            )
+            
+            # Calculate completion rates
+            total_tasks = task_stats['total_tasks'] or 0
+            completed_tasks = task_stats['completed_tasks'] or 0
+            overall_completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+            
+            total_projects = project_stats['total_projects'] or 0
+            completed_projects = project_stats['completed_projects'] or 0
+            project_completion_rate = (completed_projects / total_projects * 100) if total_projects > 0 else 0
+            
+            # Create task status breakdown
+            task_breakdown = TaskStatusBreakdown(
+                todo_count=task_stats['todo_tasks'] or 0,
+                in_progress_count=task_stats['in_progress_tasks'] or 0,
+                done_count=task_stats['completed_tasks'] or 0,
+                total_count=total_tasks
+            )
+            
+            # Create statistics object
+            statistics = OrganizationStatistics(
+                organization_id=organization.id,
+                total_projects=total_projects,
+                active_projects=project_stats['active_projects'] or 0,
+                completed_projects=completed_projects,
+                on_hold_projects=project_stats['on_hold_projects'] or 0,
+                total_tasks=total_tasks,
+                completed_tasks=completed_tasks,
+                overall_completion_rate=round(overall_completion_rate, 2),
+                project_completion_rate=round(project_completion_rate, 2),
+                task_status_breakdown=task_breakdown
+            )
+            
+            # Cache the results for 10 minutes (organization stats change less frequently)
+            cache.set(cache_key, statistics, 600)
+            
+            return statistics
+            
+        except Exception as e:
+            raise Exception(f"Error calculating organization statistics: {str(e)}")
 
 
 class Mutation(graphene.ObjectType):
@@ -520,4 +1065,14 @@ class Mutation(graphene.ObjectType):
 
 
 # Main GraphQL Schema
-schema = graphene.Schema(query=Query, mutation=Mutation)
+# Create schema with query complexity validation
+from core.query_complexity import create_complexity_validator
+
+schema = graphene.Schema(
+    query=Query, 
+    mutation=Mutation,
+    # Add validation rules for query complexity
+    validation_rules=[
+        create_complexity_validator(max_complexity=1000, max_depth=10)
+    ]
+)
