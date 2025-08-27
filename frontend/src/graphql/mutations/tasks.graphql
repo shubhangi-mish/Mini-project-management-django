@@ -1,0 +1,95 @@
+# Task Mutations
+
+mutation CreateTask($input: CreateTaskInput!) {
+  createTask(input: $input) {
+    success
+    errors
+    task {
+      id
+      title
+      description
+      status
+      assigneeEmail
+      dueDate
+      createdAt
+      updatedAt
+      isOverdue
+      isAssigned
+      commentCount
+      project {
+        id
+        name
+        status
+        organization {
+          id
+          name
+          slug
+        }
+      }
+    }
+  }
+}
+
+mutation UpdateTask($input: UpdateTaskInput!) {
+  updateTask(input: $input) {
+    success
+    errors
+    task {
+      id
+      title
+      description
+      status
+      assigneeEmail
+      dueDate
+      createdAt
+      updatedAt
+      isOverdue
+      isAssigned
+      commentCount
+      project {
+        id
+        name
+        status
+        organization {
+          id
+          name
+          slug
+        }
+      }
+    }
+  }
+}
+
+mutation DeleteTask($input: DeleteTaskInput!) {
+  deleteTask(input: $input) {
+    success
+    errors
+    deletedTaskId
+  }
+}
+
+mutation CreateTaskComment($input: CreateTaskCommentInput!) {
+  createTaskComment(input: $input) {
+    success
+    errors
+    comment {
+      id
+      content
+      authorEmail
+      authorDisplayName
+      createdAt
+      task {
+        id
+        title
+        project {
+          id
+          name
+          organization {
+            id
+            slug
+          }
+        }
+      }
+    }
+  }
+}

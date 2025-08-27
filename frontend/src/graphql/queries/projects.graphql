@@ -1,0 +1,124 @@
+# Project Queries
+
+query GetProjects(
+  $organizationSlug: String!
+  $status: String
+  $limit: Int = 50
+  $offset: Int = 0
+) {
+  projects(
+    organizationSlug: $organizationSlug
+    status: $status
+    limit: $limit
+    offset: $offset
+  ) {
+    id
+    name
+    description
+    status
+    dueDate
+    createdAt
+    updatedAt
+    taskCount
+    completedTaskCount
+    completionPercentage
+    isOverdue
+    organization {
+      id
+      name
+      slug
+    }
+  }
+}
+
+query GetProject($id: ID!, $organizationSlug: String!) {
+  project(id: $id, organizationSlug: $organizationSlug) {
+    id
+    name
+    description
+    status
+    dueDate
+    createdAt
+    updatedAt
+    taskCount
+    completedTaskCount
+    completionPercentage
+    isOverdue
+    organization {
+      id
+      name
+      slug
+      contactEmail
+    }
+    tasks {
+      id
+      title
+      description
+      status
+      assigneeEmail
+      dueDate
+      createdAt
+      updatedAt
+      isOverdue
+      isAssigned
+      commentCount
+    }
+    statistics {
+      projectId
+      totalTasks
+      completedTasks
+      inProgressTasks
+      todoTasks
+      completionRate
+      assignedTasks
+      unassignedTasks
+      overdueTasks
+      taskStatusBreakdown {
+        todoCount
+        inProgressCount
+        doneCount
+        totalCount
+      }
+    }
+  }
+}
+
+query GetProjectStatistics($projectId: ID!, $organizationSlug: String!) {
+  projectStatistics(projectId: $projectId, organizationSlug: $organizationSlug) {
+    projectId
+    totalTasks
+    completedTasks
+    inProgressTasks
+    todoTasks
+    completionRate
+    assignedTasks
+    unassignedTasks
+    overdueTasks
+    taskStatusBreakdown {
+      todoCount
+      inProgressCount
+      doneCount
+      totalCount
+    }
+  }
+}
+
+query GetOrganizationStatistics($organizationSlug: String!) {
+  organizationStatistics(organizationSlug: $organizationSlug) {
+    organizationId
+    totalProjects
+    activeProjects
+    completedProjects
+    onHoldProjects
+    totalTasks
+    completedTasks
+    overallCompletionRate
+    projectCompletionRate
+    taskStatusBreakdown {
+      todoCount
+      inProgressCount
+      doneCount
+      totalCount
+    }
+  }
+}

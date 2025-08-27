@@ -1,0 +1,116 @@
+# GraphQL Fragments for reusable field selections
+
+fragment OrganizationInfo on OrganizationType {
+  id
+  name
+  slug
+  contactEmail
+}
+
+fragment ProjectBasic on ProjectType {
+  id
+  name
+  description
+  status
+  dueDate
+  createdAt
+  updatedAt
+  taskCount
+  completedTaskCount
+  completionPercentage
+  isOverdue
+}
+
+fragment ProjectWithOrganization on ProjectType {
+  ...ProjectBasic
+  organization {
+    ...OrganizationInfo
+  }
+}
+
+fragment TaskBasic on TaskType {
+  id
+  title
+  description
+  status
+  assigneeEmail
+  dueDate
+  createdAt
+  updatedAt
+  isOverdue
+  isAssigned
+  commentCount
+}
+
+fragment TaskWithProject on TaskType {
+  ...TaskBasic
+  project {
+    id
+    name
+    status
+    organization {
+      ...OrganizationInfo
+    }
+  }
+}
+
+fragment TaskCommentBasic on TaskCommentType {
+  id
+  content
+  authorEmail
+  authorDisplayName
+  createdAt
+}
+
+fragment TaskCommentWithTask on TaskCommentType {
+  ...TaskCommentBasic
+  task {
+    id
+    title
+    project {
+      id
+      name
+      organization {
+        id
+        slug
+      }
+    }
+  }
+}
+
+fragment TaskStatusBreakdownInfo on TaskStatusBreakdown {
+  todoCount
+  inProgressCount
+  doneCount
+  totalCount
+}
+
+fragment ProjectStatisticsInfo on ProjectStatistics {
+  projectId
+  totalTasks
+  completedTasks
+  inProgressTasks
+  todoTasks
+  completionRate
+  assignedTasks
+  unassignedTasks
+  overdueTasks
+  taskStatusBreakdown {
+    ...TaskStatusBreakdownInfo
+  }
+}
+
+fragment OrganizationStatisticsInfo on OrganizationStatistics {
+  organizationId
+  totalProjects
+  activeProjects
+  completedProjects
+  onHoldProjects
+  totalTasks
+  completedTasks
+  overallCompletionRate
+  projectCompletionRate
+  taskStatusBreakdown {
+    ...TaskStatusBreakdownInfo
+  }
+}

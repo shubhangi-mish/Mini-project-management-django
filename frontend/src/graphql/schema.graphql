@@ -1,0 +1,263 @@
+# GraphQL Schema for Mini Project Management System
+
+scalar DateTime
+
+enum ProjectStatus {
+  ACTIVE
+  COMPLETED
+  ON_HOLD
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+type OrganizationType {
+  id: ID!
+  name: String!
+  slug: String!
+  contactEmail: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type TaskStatusBreakdown {
+  todoCount: Int!
+  inProgressCount: Int!
+  doneCount: Int!
+  totalCount: Int!
+}
+
+type ProjectStatistics {
+  projectId: ID!
+  totalTasks: Int!
+  completedTasks: Int!
+  inProgressTasks: Int!
+  todoTasks: Int!
+  completionRate: Float!
+  assignedTasks: Int!
+  unassignedTasks: Int!
+  overdueTasks: Int!
+  taskStatusBreakdown: TaskStatusBreakdown!
+}
+
+type OrganizationStatistics {
+  organizationId: ID!
+  totalProjects: Int!
+  activeProjects: Int!
+  completedProjects: Int!
+  onHoldProjects: Int!
+  totalTasks: Int!
+  completedTasks: Int!
+  overallCompletionRate: Float!
+  projectCompletionRate: Float!
+  taskStatusBreakdown: TaskStatusBreakdown!
+}
+
+type ProjectType {
+  id: ID!
+  name: String!
+  description: String
+  status: ProjectStatus!
+  dueDate: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  taskCount: Int
+  completedTaskCount: Int
+  completionPercentage: Float
+  isOverdue: Boolean
+  organization: OrganizationType!
+  tasks: [TaskType!]
+  statistics: ProjectStatistics
+}
+
+type TaskCommentType {
+  id: ID!
+  content: String!
+  authorEmail: String!
+  authorDisplayName: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  task: TaskType!
+}
+
+type TaskType {
+  id: ID!
+  title: String!
+  description: String
+  status: TaskStatus!
+  assigneeEmail: String
+  dueDate: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  isOverdue: Boolean
+  isAssigned: Boolean
+  commentCount: Int
+  project: ProjectType!
+  comments: [TaskCommentType!]
+}
+
+# Input Types
+input CreateProjectInput {
+  organizationSlug: String!
+  name: String!
+  description: String
+  status: ProjectStatus!
+  dueDate: DateTime
+}
+
+input UpdateProjectInput {
+  id: ID!
+  organizationSlug: String!
+  name: String
+  description: String
+  status: ProjectStatus
+  dueDate: DateTime
+}
+
+input DeleteProjectInput {
+  id: ID!
+  organizationSlug: String!
+}
+
+input CreateTaskInput {
+  organizationSlug: String!
+  projectId: ID!
+  title: String!
+  description: String
+  status: TaskStatus
+  assigneeEmail: String
+  dueDate: DateTime
+}
+
+input UpdateTaskInput {
+  id: ID!
+  organizationSlug: String!
+  title: String
+  description: String
+  status: TaskStatus
+  assigneeEmail: String
+  dueDate: DateTime
+}
+
+input DeleteTaskInput {
+  id: ID!
+  organizationSlug: String!
+}
+
+input CreateTaskCommentInput {
+  organizationSlug: String!
+  taskId: ID!
+  content: String!
+  authorEmail: String!
+}
+
+# Payload Types
+type CreateProjectPayload {
+  success: Boolean!
+  errors: [String!]
+  project: ProjectType
+}
+
+type UpdateProjectPayload {
+  success: Boolean!
+  errors: [String!]
+  project: ProjectType
+}
+
+type DeleteProjectPayload {
+  success: Boolean!
+  errors: [String!]
+  deletedProjectId: ID
+}
+
+type CreateTaskPayload {
+  success: Boolean!
+  errors: [String!]
+  task: TaskType
+}
+
+type UpdateTaskPayload {
+  success: Boolean!
+  errors: [String!]
+  task: TaskType
+}
+
+type DeleteTaskPayload {
+  success: Boolean!
+  errors: [String!]
+  deletedTaskId: ID
+}
+
+type CreateTaskCommentPayload {
+  success: Boolean!
+  errors: [String!]
+  comment: TaskCommentType
+}
+
+type Query {
+  hello: String
+  
+  # Project queries
+  projects(
+    organizationSlug: String!
+    status: String
+    limit: Int = 50
+    offset: Int = 0
+  ): [ProjectType!]!
+  
+  project(
+    id: ID!
+    organizationSlug: String!
+  ): ProjectType
+  
+  # Task queries
+  tasks(
+    organizationSlug: String!
+    projectId: ID
+    status: String
+    assigneeEmail: String
+    limit: Int = 100
+    offset: Int = 0
+  ): [TaskType!]!
+  
+  task(
+    id: ID!
+    organizationSlug: String!
+  ): TaskType
+  
+  # Comment queries
+  taskComments(
+    taskId: ID!
+    organizationSlug: String!
+    limit: Int = 50
+    offset: Int = 0
+  ): [TaskCommentType!]!
+  
+  # Statistics queries
+  projectStatistics(
+    projectId: ID!
+    organizationSlug: String!
+  ): ProjectStatistics
+  
+  organizationStatistics(
+    organizationSlug: String!
+  ): OrganizationStatistics
+}
+
+type Mutation {
+  # Project mutations
+  createProject(input: CreateProjectInput!): CreateProjectPayload!
+  updateProject(input: UpdateProjectInput!): UpdateProjectPayload!
+  deleteProject(input: DeleteProjectInput!): DeleteProjectPayload!
+  
+  # Task mutations
+  createTask(input: CreateTaskInput!): CreateTaskPayload!
+  updateTask(input: UpdateTaskInput!): UpdateTaskPayload!
+  deleteTask(input: DeleteTaskInput!): DeleteTaskPayload!
+  
+  # Comment mutations
+  createTaskComment(input: CreateTaskCommentInput!): CreateTaskCommentPayload!
+}

@@ -1,0 +1,59 @@
+# Project Mutations
+
+mutation CreateProject($input: CreateProjectInput!) {
+  createProject(input: $input) {
+    success
+    errors
+    project {
+      id
+      name
+      description
+      status
+      dueDate
+      createdAt
+      updatedAt
+      taskCount
+      completedTaskCount
+      completionPercentage
+      isOverdue
+      organization {
+        id
+        name
+        slug
+      }
+    }
+  }
+}
+
+mutation UpdateProject($input: UpdateProjectInput!) {
+  updateProject(input: $input) {
+    success
+    errors
+    project {
+      id
+      name
+      description
+      status
+      dueDate
+      createdAt
+      updatedAt
+      taskCount
+      completedTaskCount
+      completionPercentage
+      isOverdue
+      organization {
+        id
+        name
+        slug
+      }
+    }
+  }
+}
+
+mutation DeleteProject($input: DeleteProjectInput!) {
+  deleteProject(input: $input) {
+    success
+    errors
+    deletedProjectId
+  }
+}

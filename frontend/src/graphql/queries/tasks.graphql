@@ -1,0 +1,109 @@
+# Task Queries
+
+query GetTasks(
+  $organizationSlug: String!
+  $projectId: ID
+  $status: String
+  $assigneeEmail: String
+  $limit: Int = 100
+  $offset: Int = 0
+) {
+  tasks(
+    organizationSlug: $organizationSlug
+    projectId: $projectId
+    status: $status
+    assigneeEmail: $assigneeEmail
+    limit: $limit
+    offset: $offset
+  ) {
+    id
+    title
+    description
+    status
+    assigneeEmail
+    dueDate
+    createdAt
+    updatedAt
+    isOverdue
+    isAssigned
+    commentCount
+    project {
+      id
+      name
+      status
+      organization {
+        id
+        name
+        slug
+      }
+    }
+  }
+}
+
+query GetTask($id: ID!, $organizationSlug: String!) {
+  task(id: $id, organizationSlug: $organizationSlug) {
+    id
+    title
+    description
+    status
+    assigneeEmail
+    dueDate
+    createdAt
+    updatedAt
+    isOverdue
+    isAssigned
+    commentCount
+    project {
+      id
+      name
+      description
+      status
+      dueDate
+      organization {
+        id
+        name
+        slug
+        contactEmail
+      }
+    }
+    comments {
+      id
+      content
+      authorEmail
+      authorDisplayName
+      createdAt
+    }
+  }
+}
+
+query GetTaskComments(
+  $taskId: ID!
+  $organizationSlug: String!
+  $limit: Int = 50
+  $offset: Int = 0
+) {
+  taskComments(
+    taskId: $taskId
+    organizationSlug: $organizationSlug
+    limit: $limit
+    offset: $offset
+  ) {
+    id
+    content
+    authorEmail
+    authorDisplayName
+    createdAt
+    task {
+      id
+      title
+      project {
+        id
+        name
+        organization {
+          id
+          slug
+        }
+      }
+    }
+  }
+}
