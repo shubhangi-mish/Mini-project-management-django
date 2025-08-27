@@ -1,16 +1,24 @@
 """
 Performance tests for GraphQL endpoints to verify N+1 prevention and optimization.
+Tests database query efficiency, caching behavior, and performance benchmarks.
 """
 import time
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
-from django.db import connection
+from django.db import connection, reset_queries
 from django.core.cache import cache
 from graphene.test import Client
+from unittest.mock import patch
+import statistics
+
 from core.models import Organization
 from projects.models import Project
 from tasks.models import Task, TaskComment
 from mini_project_management.schema import schema
+from core.test_factories import (
+    OrganizationFactory, ProjectFactory, TaskFactory, TaskCommentFactory,
+    create_complete_test_scenario
+)
 
 
 class GraphQLPerformanceTestCase(TransactionTestCase):
@@ -65,9 +73,11 @@ class GraphQLPerformanceTestCase(TransactionTestCase):
     
     def count_queries(self, func):
         """Count the number of database queries executed by a function."""
+        reset_queries()
         initial_queries = len(connection.queries)
-        func()
-        return len(connection.queries) - initial_queries
+        result = func()
+        final_queries = len(connection.queries)
+        return result, final_queries - initial_queries
     
     def measure_time(self, func):
         """Measure the execution time of a function."""
@@ -75,6 +85,28 @@ class GraphQLPerformanceTestCase(TransactionTestCase):
         result = func()
         end_time = time.time()
         return result, end_time - start_time
+    
+    def benchmark_query(self, func, iterations=5):
+        """Benchmark a query function multiple times and return statistics."""
+        times = []
+        query_counts = []
+        
+        for _ in range(iterations):
+            result, execution_time = self.measure_time(func)
+            _, query_count = self.count_queries(func)
+            
+            times.append(execution_time)
+            query_counts.append(query_count)
+        
+        return {
+            'avg_time': statistics.mean(times),
+            'min_time': min(times),
+            'max_time': max(times),
+            'avg_queries': statistics.mean(query_counts),
+            'min_queries': min(query_counts),
+            'max_queries': max(query_counts),
+            'iterations': iterations
+        }
 
 
 class ProjectQueryPerformanceTest(GraphQLPerformanceTestCase):
@@ -549,6 +581,414 @@ class CachePerformanceTest(GraphQLPerformanceTestCase):
         self.assertEqual(new_total, old_total + 1)
         
         print(f"Cache invalidation test: {old_total} -> {new_total} tasks")
+
+
+class DatabaseQueryOptimizationTest(GraphQLPerformanceTestCase):
+    """Test database query optimization and N+1 prevention."""
+    
+    def test_select_related_optimization(self):
+        """Test that select_related is used for foreign key relationships."""
+        query = '''
+        query GetTasks($organizationSlug: String!) {
+            tasks(organizationSlug: $organizationSlug, limit: 10) {
+                id
+                title
+                project {
+                    id
+                    name
+                    organization {
+                        id
+                        name
+                    }
+                }
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        
+        def execute_query():
+            return self.client.execute(query, variables=variables)
+        
+        result, query_count = self.count_queries(execute_query)
+        
+        # Should use select_related to fetch project and organization in minimal queries
+        self.assertIsNone(result.get('errors'))
+        self.assertLess(query_count, 5, f"Too many queries for select_related: {query_count}")
+        
+        print(f"Select related optimization: {query_count} queries")
+    
+    def test_prefetch_related_optimization(self):
+        """Test that prefetch_related is used for reverse foreign key relationships."""
+        query = '''
+        query GetProjects($organizationSlug: String!) {
+            projects(organizationSlug: $organizationSlug) {
+                id
+                name
+                tasks {
+                    id
+                    title
+                    status
+                }
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        
+        def execute_query():
+            return self.client.execute(query, variables=variables)
+        
+        result, query_count = self.count_queries(execute_query)
+        
+        # Should use prefetch_related to fetch all tasks efficiently
+        self.assertIsNone(result.get('errors'))
+        self.assertLess(query_count, 8, f"Too many queries for prefetch_related: {query_count}")
+        
+        print(f"Prefetch related optimization: {query_count} queries")
+    
+    def test_annotation_optimization(self):
+        """Test that database annotations are used for computed fields."""
+        query = '''
+        query GetProjects($organizationSlug: String!) {
+            projects(organizationSlug: $organizationSlug) {
+                id
+                name
+                taskCount
+                completedTaskCount
+                completionPercentage
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        
+        def execute_query():
+            return self.client.execute(query, variables=variables)
+        
+        result, query_count = self.count_queries(execute_query)
+        
+        # Should use database annotations instead of Python loops
+        self.assertIsNone(result.get('errors'))
+        self.assertLess(query_count, 6, f"Too many queries for annotations: {query_count}")
+        
+        print(f"Annotation optimization: {query_count} queries")
+
+
+class ScalabilityTest(GraphQLPerformanceTestCase):
+    """Test system scalability with larger datasets."""
+    
+    def setUp(self):
+        """Set up larger test dataset."""
+        super().setUp()
+        
+        # Create additional data for scalability testing
+        for i in range(10):  # 10 more projects
+            project = ProjectFactory(organization=self.organization)
+            
+            for j in range(20):  # 20 tasks per project
+                task = TaskFactory(project=project)
+                
+                for k in range(5):  # 5 comments per task
+                    TaskCommentFactory(task=task)
+    
+    def test_large_dataset_query_performance(self):
+        """Test query performance with large dataset."""
+        query = '''
+        query GetAllData($organizationSlug: String!) {
+            projects(organizationSlug: $organizationSlug) {
+                id
+                name
+                taskCount
+                tasks {
+                    id
+                    title
+                    commentCount
+                }
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        
+        def execute_query():
+            return self.client.execute(query, variables=variables)
+        
+        # Benchmark the query
+        benchmark = self.benchmark_query(execute_query, iterations=3)
+        
+        # Performance assertions
+        self.assertLess(benchmark['avg_time'], 2.0, f"Query too slow: {benchmark['avg_time']:.3f}s")
+        self.assertLess(benchmark['avg_queries'], 15, f"Too many queries: {benchmark['avg_queries']}")
+        
+        print(f"Large dataset performance: {benchmark['avg_time']:.3f}s avg, {benchmark['avg_queries']} queries avg")
+    
+    def test_pagination_performance(self):
+        """Test pagination performance with large dataset."""
+        query = '''
+        query GetPaginatedTasks($organizationSlug: String!, $limit: Int!, $offset: Int!) {
+            tasks(organizationSlug: $organizationSlug, limit: $limit, offset: $offset) {
+                id
+                title
+                project {
+                    name
+                }
+            }
+        }
+        '''
+        
+        # Test different page sizes
+        page_sizes = [10, 50, 100]
+        
+        for page_size in page_sizes:
+            variables = {
+                "organizationSlug": self.organization.slug,
+                "limit": page_size,
+                "offset": 0
+            }
+            
+            def execute_query():
+                return self.client.execute(query, variables=variables)
+            
+            result, query_count = self.count_queries(execute_query)
+            _, execution_time = self.measure_time(execute_query)
+            
+            self.assertIsNone(result.get('errors'))
+            self.assertLess(query_count, 8, f"Too many queries for page size {page_size}: {query_count}")
+            self.assertLess(execution_time, 1.0, f"Query too slow for page size {page_size}: {execution_time:.3f}s")
+            
+            print(f"Pagination (size {page_size}): {query_count} queries, {execution_time:.3f}s")
+
+
+class CacheEfficiencyTest(GraphQLPerformanceTestCase):
+    """Test caching efficiency and cache hit rates."""
+    
+    def test_statistics_cache_efficiency(self):
+        """Test that statistics queries are efficiently cached."""
+        query = '''
+        query GetStats($projectId: ID!, $organizationSlug: String!) {
+            projectStatistics(projectId: $projectId, organizationSlug: $organizationSlug) {
+                totalTasks
+                completionRate
+                taskStatusBreakdown {
+                    todoCount
+                    doneCount
+                }
+            }
+        }
+        '''
+        
+        project = self.projects[0]
+        variables = {
+            "projectId": str(project.id),
+            "organizationSlug": self.organization.slug
+        }
+        
+        # Clear cache
+        cache.clear()
+        
+        # First execution (cache miss)
+        def execute_query():
+            return self.client.execute(query, variables=variables)
+        
+        result1, query_count1 = self.count_queries(execute_query)
+        _, time1 = self.measure_time(execute_query)
+        
+        # Second execution (cache hit)
+        result2, query_count2 = self.count_queries(execute_query)
+        _, time2 = self.measure_time(execute_query)
+        
+        # Third execution (cache hit)
+        result3, query_count3 = self.count_queries(execute_query)
+        _, time3 = self.measure_time(execute_query)
+        
+        # Verify results are consistent
+        self.assertEqual(result1['data'], result2['data'])
+        self.assertEqual(result2['data'], result3['data'])
+        
+        # Cache hits should be faster and use fewer queries
+        self.assertLessEqual(query_count2, query_count1)
+        self.assertLessEqual(query_count3, query_count1)
+        self.assertLess(time2, time1 * 1.5)  # Allow some variance
+        self.assertLess(time3, time1 * 1.5)
+        
+        print(f"Cache efficiency - Miss: {query_count1} queries, {time1:.3f}s")
+        print(f"Cache efficiency - Hit1: {query_count2} queries, {time2:.3f}s")
+        print(f"Cache efficiency - Hit2: {query_count3} queries, {time3:.3f}s")
+    
+    def test_cache_invalidation_performance(self):
+        """Test that cache invalidation doesn't impact performance significantly."""
+        # Set up cached data
+        project = self.projects[0]
+        
+        stats_query = '''
+        query GetStats($projectId: ID!, $organizationSlug: String!) {
+            projectStatistics(projectId: $projectId, organizationSlug: $organizationSlug) {
+                totalTasks
+                completionRate
+            }
+        }
+        '''
+        
+        variables = {
+            "projectId": str(project.id),
+            "organizationSlug": self.organization.slug
+        }
+        
+        # Execute query to populate cache
+        self.client.execute(stats_query, variables=variables)
+        
+        # Measure cache invalidation through mutation
+        create_task_mutation = '''
+        mutation CreateTask($input: CreateTaskInput!) {
+            createTask(input: $input) {
+                success
+                task { id }
+            }
+        }
+        '''
+        
+        task_input = {
+            "organizationSlug": self.organization.slug,
+            "projectId": str(project.id),
+            "title": f"Cache Test Task {time.time()}",
+            "status": "TODO"
+        }
+        
+        def execute_mutation():
+            return self.client.execute(
+                create_task_mutation,
+                variables={"input": task_input}
+            )
+        
+        # Measure mutation performance
+        _, mutation_time = self.measure_time(execute_mutation)
+        
+        # Should complete quickly even with cache invalidation
+        self.assertLess(mutation_time, 0.5, f"Mutation with cache invalidation too slow: {mutation_time:.3f}s")
+        
+        print(f"Cache invalidation performance: {mutation_time:.3f}s")
+
+
+class ConcurrencyTest(GraphQLPerformanceTestCase):
+    """Test system behavior under concurrent load."""
+    
+    def test_concurrent_read_performance(self):
+        """Test performance under concurrent read operations."""
+        import threading
+        import queue
+        
+        query = '''
+        query GetProjects($organizationSlug: String!) {
+            projects(organizationSlug: $organizationSlug) {
+                id
+                name
+                taskCount
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        results_queue = queue.Queue()
+        
+        def execute_query():
+            try:
+                start_time = time.time()
+                result = self.client.execute(query, variables=variables)
+                end_time = time.time()
+                
+                results_queue.put({
+                    'success': result.get('errors') is None,
+                    'time': end_time - start_time
+                })
+            except Exception as e:
+                results_queue.put({
+                    'success': False,
+                    'error': str(e),
+                    'time': None
+                })
+        
+        # Execute 10 concurrent queries
+        threads = []
+        for _ in range(10):
+            thread = threading.Thread(target=execute_query)
+            threads.append(thread)
+        
+        # Start all threads
+        start_time = time.time()
+        for thread in threads:
+            thread.start()
+        
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+        
+        total_time = time.time() - start_time
+        
+        # Collect results
+        results = []
+        while not results_queue.empty():
+            results.append(results_queue.get())
+        
+        # Verify all queries succeeded
+        successful_queries = [r for r in results if r['success']]
+        self.assertEqual(len(successful_queries), 10, "Not all concurrent queries succeeded")
+        
+        # Check performance
+        avg_query_time = statistics.mean([r['time'] for r in successful_queries])
+        self.assertLess(total_time, 5.0, f"Concurrent queries took too long: {total_time:.3f}s")
+        self.assertLess(avg_query_time, 1.0, f"Average query time too slow: {avg_query_time:.3f}s")
+        
+        print(f"Concurrent reads: {total_time:.3f}s total, {avg_query_time:.3f}s avg per query")
+
+
+class MemoryUsageTest(GraphQLPerformanceTestCase):
+    """Test memory usage and potential memory leaks."""
+    
+    def test_memory_usage_with_large_results(self):
+        """Test memory usage when returning large result sets."""
+        import psutil
+        import os
+        
+        # Get initial memory usage
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        query = '''
+        query GetLargeDataset($organizationSlug: String!) {
+            projects(organizationSlug: $organizationSlug) {
+                id
+                name
+                description
+                tasks {
+                    id
+                    title
+                    description
+                    comments {
+                        id
+                        content
+                        authorEmail
+                    }
+                }
+            }
+        }
+        '''
+        
+        variables = {"organizationSlug": self.organization.slug}
+        
+        # Execute query multiple times to check for memory leaks
+        for i in range(5):
+            result = self.client.execute(query, variables=variables)
+            self.assertIsNone(result.get('errors'))
+        
+        # Check final memory usage
+        final_memory = process.memory_info().rss / 1024 / 1024  # MB
+        memory_increase = final_memory - initial_memory
+        
+        # Memory increase should be reasonable (less than 100MB for this test)
+        self.assertLess(memory_increase, 100, f"Excessive memory usage: {memory_increase:.2f}MB increase")
+        
+        print(f"Memory usage: {initial_memory:.2f}MB -> {final_memory:.2f}MB (+{memory_increase:.2f}MB)")
 
 
 if __name__ == '__main__':

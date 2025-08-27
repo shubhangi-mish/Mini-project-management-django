@@ -1,17 +1,13 @@
-import { useQuery, useMutation, gql } from '@apollo/client';
-import {
-  GetTasksQuery,
-  GetTasksQueryVariables,
-  GetTaskQuery,
-  GetTaskQueryVariables,
-  CreateTaskMutation,
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+// Apollo Client hooks imported from generated types
+import type {
   CreateTaskMutationVariables,
-  UpdateTaskMutation,
   UpdateTaskMutationVariables,
-  DeleteTaskMutation,
   DeleteTaskMutationVariables,
-  CreateTaskCommentMutation,
   CreateTaskCommentMutationVariables,
+} from '../graphql/generated/types';
+import {
   useGetTasksQuery,
   useGetTaskQuery,
   useCreateTaskMutation,

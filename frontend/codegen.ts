@@ -15,7 +15,6 @@ const config: CodegenConfig = {
         withHooks: true,
         withHOC: false,
         withComponent: false,
-        apolloReactHooksImportFrom: '@apollo/client',
         skipTypename: false,
         enumsAsTypes: true,
         constEnums: true,

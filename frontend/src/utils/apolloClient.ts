@@ -2,12 +2,13 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { 
   ApolloClient, 
   InMemoryCache, 
   HttpLink, 
   from,
-  DefaultOptions
+  type DefaultOptions
 } from '@apollo/client';
 import { setContext } from '@apollo/client/link/context';
 import { onError } from '@apollo/client/link/error';
@@ -28,15 +29,33 @@ const authLink = setContext((_, { headers }) => {
   };
 });
 
-// Simple retry logic using error link
-const retryAttempts = new Map();
+// Enhanced error handling with retry logic
+const retryAttempts = new Map<string, number>();
 
-const getRetryCount = (operationName: string): number => {
-  return retryAttempts.get(operationName) || 0;
-};
+const shouldRetry = (error: any, operation: any): boolean => {
+  const operationName = operation.operationName || 'unknown';
+  const currentAttempts = retryAttempts.get(operationName) || 0;
+  
+  if (currentAttempts >= 3) {
+    return false; // Max 3 retry attempts
+  }
 
-const setRetryCount = (operationName: string, count: number): void => {
-  retryAttempts.set(operationName, count);
+  // Retry on network errors and server errors (5xx)
+  if (error && 'networkError' in error && error.networkError) {
+    const networkError = error.networkError as any;
+    
+    // Don't retry on client errors (4xx) except 408, 429
+    if ('statusCode' in networkError) {
+      const statusCode = networkError.statusCode;
+      return statusCode >= 500 || statusCode === 408 || statusCode === 429;
+    }
+    
+    // Retry on network failures (no status code)
+    return true;
+  }
+  
+  // Don't retry on GraphQL errors
+  return false;
 };
 
 // Error link for handling GraphQL and network errors
@@ -58,20 +77,46 @@ const errorLink = onError((errorResponse: any) => {
         clearCurrentOrganizationSlug();
         // Could redirect to login page here
       }
+      
+      // Show user-friendly error messages for common GraphQL errors
+      if (error.extensions?.code === 'VALIDATION_ERROR') {
+        // These will be handled by form components
+        console.warn('Validation error:', error.message);
+      }
+      
+      if (error.extensions?.code === 'NOT_FOUND') {
+        console.warn('Resource not found:', error.message);
+      }
     });
   }
 
   if (networkError) {
     const operationName = operation.operationName || 'unknown';
-    const retryCount = getRetryCount(operationName);
     
     // eslint-disable-next-line no-console
     console.error('Network error:', {
       message: networkError.message,
       statusCode: 'statusCode' in networkError ? networkError.statusCode : undefined,
       operation: operationName,
-      retryCount
     });
+    
+    // Check if we should retry
+    if (shouldRetry(errorResponse, operation)) {
+      const currentAttempts = retryAttempts.get(operationName) || 0;
+      retryAttempts.set(operationName, currentAttempts + 1);
+      
+      // Add delay before retry (exponential backoff)
+      const delay = Math.min(1000 * Math.pow(2, currentAttempts), 10000);
+      
+      setTimeout(() => {
+        forward(operation);
+      }, delay);
+      
+      return; // Don't continue with error handling, we're retrying
+    }
+    
+    // Reset retry count after final attempt
+    retryAttempts.delete(operationName);
     
     // Handle specific network errors
     if ('statusCode' in networkError) {
@@ -80,23 +125,19 @@ const errorLink = onError((errorResponse: any) => {
       if (statusCode === 401) {
         // Handle unauthorized access
         clearCurrentOrganizationSlug();
-        // Could redirect to login page here
+        console.warn('Unauthorized access - clearing organization context');
       } else if (statusCode === 403) {
         // Handle forbidden access
         console.warn('Access forbidden for operation:', operationName);
-      } else if (statusCode >= 500 && retryCount < 3) {
-        // Retry server errors up to 3 times
-        setRetryCount(operationName, retryCount + 1);
-        return forward(operation);
+      } else if (statusCode === 404) {
+        console.warn('Resource not found for operation:', operationName);
+      } else if (statusCode >= 500) {
+        console.error('Server error for operation:', operationName);
       }
-    } else if (retryCount < 2) {
-      // Retry network errors up to 2 times
-      setRetryCount(operationName, retryCount + 1);
-      return forward(operation);
+    } else {
+      // Network connectivity issues
+      console.error('Network connectivity error for operation:', operationName);
     }
-    
-    // Reset retry count after final attempt
-    setRetryCount(operationName, 0);
   }
 });
 
@@ -170,5 +211,4 @@ export const apolloClient = new ApolloClient({
     },
   }),
   defaultOptions,
-  connectToDevTools: import.meta.env.DEV,
 });

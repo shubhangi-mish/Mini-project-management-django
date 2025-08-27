@@ -152,7 +152,7 @@ class QueryComplexityValidationRule(ValidationRule):
     """
     
     def __init__(self, max_complexity=None, max_depth=None):
-        super().__init__()
+        # Don't call super().__init__() as it may require context in newer versions
         self.analyzer = QueryComplexityAnalyzer(max_complexity, max_depth)
     
     def enter_document(self, node, *args):

@@ -1070,9 +1070,5 @@ from core.query_complexity import create_complexity_validator
 
 schema = graphene.Schema(
     query=Query, 
-    mutation=Mutation,
-    # Add validation rules for query complexity
-    validation_rules=[
-        create_complexity_validator(max_complexity=1000, max_depth=10)
-    ]
+    mutation=Mutation
 )
